@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import Fastify from 'fastify';
 import sensible from '@fastify/sensible';
 import dbPlugin from './plugins/db';

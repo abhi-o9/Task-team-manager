@@ -1,87 +1,85 @@
-import { DocumentScope } from 'nano';
-import { v4 as uuidv4 } from 'uuid';
+import { PrismaClient } from '@prisma/client';
 
 export class CommentService {
-  constructor(private db: DocumentScope<any>) {}
+  constructor(private db: PrismaClient) { }
 
-  async checkTaskAccess(userId: string, taskId: string, userRole: string) {
-    if (userRole === 'ADMIN') return true;
-
-    const task = await this.db.get(taskId).catch(() => null);
-    if (!task || task.type !== 'TASK') throw { statusCode: 404, message: 'Task not found' };
-
-    const project = await this.db.get(task.projectId).catch(() => null);
-
-    const qMembers = await this.db.find({
-      selector: { type: 'PROJECT_MEMBER', projectId: task.projectId, userId },
-      limit: 1
+  async createComment(userId: string, userRole: string, taskId: string, content: string) {
+    const task = await this.db.task.findUnique({
+      where: { id: taskId },
+      include: { project: { include: { members: { where: { userId } } } } }
     });
 
-    if (project?.ownerId !== userId && qMembers.docs.length === 0) {
+    if (!task) throw { statusCode: 404, message: 'Task not found' };
+
+    if (userRole !== 'ADMIN' && task.project.ownerId !== userId && task.project.members.length === 0) {
       throw { statusCode: 403, message: 'Forbidden' };
     }
 
-    return task;
-  }
-
-  async createComment(userId: string, userRole: string, taskId: string, body: string) {
-    await this.checkTaskAccess(userId, taskId, userRole);
-
-    const commentDoc = {
-      _id: `comment_${uuidv4()}`,
-      type: 'COMMENT',
-      taskId,
-      authorId: userId,
-      body,
-      createdAt: new Date().toISOString()
-    };
-
-    await this.db.insert(commentDoc);
-
-    const author = await this.db.get(userId).catch(() => null);
-
-    const { _id, ...rest } = commentDoc as any;
-    return {
-      id: _id,
-      ...rest,
-      author: author ? { id: author._id, name: author.name, avatarUrl: author.avatarUrl } : null
-    };
+    return this.db.comment.create({
+      data: {
+        taskId,
+        authorId: userId,
+        content
+      },
+      include: {
+        author: { select: { id: true, name: true, avatarUrl: true } }
+      }
+    });
   }
 
   async listComments(userId: string, userRole: string, taskId: string) {
-    await this.checkTaskAccess(userId, taskId, userRole);
-
-    const qComments = await this.db.find({
-      selector: { type: 'COMMENT', taskId },
-      limit: 1000
+    const task = await this.db.task.findUnique({
+      where: { id: taskId },
+      include: { project: { include: { members: { where: { userId } } } } }
     });
 
-    const userIds = [...new Set(qComments.docs.map(c => c.authorId))];
-    const qUsers = await this.db.find({
-      selector: { type: 'USER', _id: { $in: userIds } },
-      limit: 1000
-    });
-    const userMap = new Map(qUsers.docs.map(u => [u._id, u]));
+    if (!task) throw { statusCode: 404, message: 'Task not found' };
 
-    return qComments.docs.map(c => {
-      const author = userMap.get(c.authorId);
-      const { _rev, _id, ...rest } = c;
-      return {
-        id: _id,
-        ...rest,
-        author: author ? { id: author._id, name: author.name, avatarUrl: author.avatarUrl } : null
-      };
-    }).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-  }
-
-  async deleteComment(userId: string, userRole: string, id: string) {
-    const comment = await this.db.get(id).catch(() => null);
-    if (!comment || comment.type !== 'COMMENT') throw { statusCode: 404, message: 'Comment not found' };
-
-    if (userRole !== 'ADMIN' && comment.authorId !== userId) {
+    if (userRole !== 'ADMIN' && task.project.ownerId !== userId && task.project.members.length === 0) {
       throw { statusCode: 403, message: 'Forbidden' };
     }
 
-    await this.db.destroy(comment._id, comment._rev);
+    return this.db.comment.findMany({
+      where: { taskId },
+      include: {
+        author: { select: { id: true, name: true, avatarUrl: true } }
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+  }
+
+  async deleteComment(userId: string, userRole: string, id: string) {
+    const comment = await this.db.comment.findUnique({
+      where: { id },
+      include: { task: { include: { project: true } } }
+    });
+
+    if (!comment) throw { statusCode: 404, message: 'Comment not found' };
+
+    const isProjectOwner = comment.task.project.ownerId === userId;
+    const isCommentAuthor = comment.authorId === userId;
+
+    if (userRole !== 'ADMIN' && !isProjectOwner && !isCommentAuthor) {
+      throw { statusCode: 403, message: 'Forbidden' };
+    }
+
+    await this.db.comment.delete({ where: { id } });
+  }
+
+  async updateComment(userId: string, id: string, content: string) {
+    const comment = await this.db.comment.findUnique({ where: { id } });
+    if (!comment) throw { statusCode: 404, message: 'Comment not found' };
+
+    if (comment.authorId !== userId) {
+      throw { statusCode: 403, message: 'Forbidden' };
+    }
+
+    return this.db.comment.update({
+      where: { id },
+      data: { content },
+      include: {
+        author: { select: { id: true, name: true, avatarUrl: true } }
+      }
+    });
   }
 }

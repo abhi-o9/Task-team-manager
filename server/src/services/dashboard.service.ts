@@ -1,18 +1,17 @@
-import { DocumentScope } from 'nano';
+import { PrismaClient, TaskStatus, UserRole } from '@prisma/client';
 
 export class DashboardService {
-  constructor(private db: DocumentScope<any>) {}
+  constructor(private db: PrismaClient) {}
 
   async getSummary(userId: string) {
     const now = new Date();
     const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    const qTasks = await this.db.find({
-      selector: { type: 'TASK', assigneeId: userId },
-      limit: 5000
+    const userTasks = await this.db.task.findMany({
+      where: { assignments: { some: { userId } } },
+      orderBy: { dueDate: 'asc' }
     });
-    const userTasks = qTasks.docs;
 
     const totalTasks = userTasks.length;
     const statusGroups = userTasks.reduce((acc, t) => {
@@ -26,7 +25,7 @@ export class DashboardService {
     const completedRecent = [];
 
     for (const t of userTasks) {
-      if (t.status !== 'DONE' && t.dueDate) {
+      if (t.status !== TaskStatus.DONE && t.dueDate) {
         const due = new Date(t.dueDate);
         if (due < now) overdueCount++;
         else if (due <= nextWeek) {
@@ -34,17 +33,13 @@ export class DashboardService {
           tasksDueThisWeek.push(t);
         }
       }
-      if (t.status === 'DONE' && t.updatedAt) {
+      if (t.status === TaskStatus.DONE && t.updatedAt) {
         const updated = new Date(t.updatedAt);
         if (updated >= sevenDaysAgo) completedRecent.push(t);
       }
     }
 
-    tasksDueThisWeek.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
-    const topDueThisWeek = tasksDueThisWeek.slice(0, 5).map(t => {
-      const { _rev, _id, ...rest } = t;
-      return { id: _id, ...rest };
-    });
+    const topDueThisWeek = tasksDueThisWeek.slice(0, 5);
 
     const days: Record<string, number> = {};
     for (let i = 6; i >= 0; i--) {
@@ -52,7 +47,7 @@ export class DashboardService {
       days[d.toISOString().split('T')[0]] = 0;
     }
     completedRecent.forEach(t => {
-      const dateStr = t.updatedAt.split('T')[0];
+      const dateStr = t.updatedAt.toISOString().split('T')[0];
       if (days[dateStr] !== undefined) {
         days[dateStr]++;
       }
@@ -71,21 +66,19 @@ export class DashboardService {
   }
 
   async getAdminStats() {
-    const qUsers = await this.db.find({ selector: { type: 'USER' }, limit: 10000 });
-    const qProjects = await this.db.find({ selector: { type: 'PROJECT' }, limit: 10000 });
-    const qTasks = await this.db.find({ selector: { type: 'TASK' }, limit: 10000 });
+    const [totalUsers, totalProjects, totalTasks, doneTasks, recentSignups] = await Promise.all([
+      this.db.user.count(),
+      this.db.project.count(),
+      this.db.task.count(),
+      this.db.task.count({ where: { status: TaskStatus.DONE } }),
+      this.db.user.findMany({
+        take: 5,
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, name: true, email: true, createdAt: true }
+      })
+    ]);
 
-    const totalUsers = qUsers.docs.length;
-    const totalProjects = qProjects.docs.length;
-    const totalTasks = qTasks.docs.length;
-    
-    const doneTasks = qTasks.docs.filter(t => t.status === 'DONE').length;
     const completionRate = totalTasks > 0 ? (doneTasks / totalTasks) * 100 : 0;
-
-    const recentSignups = qUsers.docs
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 5)
-      .map(u => ({ id: u._id, name: u.name, email: u.email, createdAt: u.createdAt }));
 
     return {
       totalUsers,
@@ -97,14 +90,19 @@ export class DashboardService {
   }
 
   async getManagerStats(userId: string) {
-    // 1. Find projects where user is MANAGER
-    const qMembers = await this.db.find({
-      selector: { type: 'PROJECT_MEMBER', userId, role: 'MANAGER' },
-      limit: 1000
+    const managedProjects = await this.db.project.findMany({
+      where: {
+        members: {
+          some: { userId, role: UserRole.MANAGER }
+        }
+      },
+      include: {
+        tasks: true,
+        members: true
+      }
     });
-    const projectIds = qMembers.docs.map(m => m.projectId);
 
-    if (projectIds.length === 0) {
+    if (managedProjects.length === 0) {
       return {
         totalProjects: 0,
         totalTasks: 0,
@@ -114,41 +112,24 @@ export class DashboardService {
       };
     }
 
-    // 2. Fetch projects
-    const qProjects = await this.db.find({
-      selector: { type: 'PROJECT', _id: { $in: projectIds } },
-      limit: 1000
-    });
+    const totalProjects = managedProjects.length;
+    let totalTasks = 0;
+    let completedTasks = 0;
+    const uniqueMemberIds = new Set<string>();
 
-    // 3. Fetch tasks for these projects
-    const qTasks = await this.db.find({
-      selector: { type: 'TASK', projectId: { $in: projectIds } },
-      limit: 5000
-    });
+    const projectBreakdown = managedProjects.map(p => {
+      const pTasks = p.tasks;
+      const done = pTasks.filter(t => t.status === TaskStatus.DONE).length;
+      totalTasks += pTasks.length;
+      completedTasks += done;
+      p.members.forEach(m => uniqueMemberIds.add(m.userId));
 
-    // 4. Fetch all members for these projects to count unique members
-    const qAllMembers = await this.db.find({
-      selector: { type: 'PROJECT_MEMBER', projectId: { $in: projectIds } },
-      limit: 5000
-    });
-
-    const totalProjects = qProjects.docs.length;
-    const totalTasks = qTasks.docs.length;
-    const completedTasks = qTasks.docs.filter(t => t.status === 'DONE').length;
-    const uniqueMemberIds = new Set(qAllMembers.docs.map(m => m.userId));
-    const activeMembers = uniqueMemberIds.size;
-
-    const projectBreakdown = qProjects.docs.map(p => {
-      const pTasks = qTasks.docs.filter(t => t.projectId === p._id);
-      const done = pTasks.filter(t => t.status === 'DONE').length;
-      const prog = pTasks.length > 0 ? Math.round((done / pTasks.length) * 100) : 0;
-      
       return {
-        id: p._id,
+        id: p.id,
         name: p.name,
         taskCount: pTasks.length,
         completedCount: done,
-        progress: prog
+        progress: pTasks.length > 0 ? Math.round((done / pTasks.length) * 100) : 0
       };
     });
 
@@ -156,7 +137,7 @@ export class DashboardService {
       totalProjects,
       totalTasks,
       completedTasks,
-      activeMembers,
+      activeMembers: uniqueMemberIds.size,
       projectBreakdown
     };
   }

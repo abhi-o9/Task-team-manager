@@ -1,12 +1,9 @@
 import fp from 'fastify-plugin';
 import fastifyJwt from '@fastify/jwt';
 import { FastifyReply, FastifyRequest } from 'fastify';
-import { DocumentScope } from 'nano';
-
 declare module 'fastify' {
   interface FastifyInstance {
     authenticate: any;
-    db: DocumentScope<any>;
   }
 }
 

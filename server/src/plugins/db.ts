@@ -1,57 +1,48 @@
 import fp from 'fastify-plugin';
-import nano, { ServerScope, DocumentScope } from 'nano';
+import { PrismaClient, UserRole, UserStatus } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import pg from 'pg';
 import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    db: PrismaClient;
+  }
+}
 
 export default fp(async (fastify) => {
-  const url = process.env.COUCHDB_URL || 'http://admin:admin@127.0.0.1:5984';
-  const maskedUrl = url.replace(/:([^@]+)@/, ':****@');
-  fastify.log.info(`Connecting to CouchDB at: ${maskedUrl}`);
-  const couch: ServerScope = nano(url);
-
-  const dbName = 'taskflow';
+  const connectionString = process.env.DATABASE_URL;
+  const pool = new pg.Pool({ connectionString });
+  const adapter = new PrismaPg(pool);
+  const prisma = new PrismaClient({
+    adapter,
+    log: ['error'],
+  });
 
   try {
-    await couch.db.get(dbName);
-  } catch (e: any) {
-    if (e.statusCode === 404) {
-      await couch.db.create(dbName);
-      fastify.log.info(`Created CouchDB database: ${dbName}`);
-    } else {
-      fastify.log.error(e);
-      throw e;
-    }
-  }
-
-  const db: DocumentScope<any> = couch.use(dbName);
-
-  // Setup basic indexes
-  try {
-    await db.createIndex({ index: { fields: ['type'] } });
-    await db.createIndex({ index: { fields: ['email'] } });
-    await db.createIndex({ index: { fields: ['type', 'projectId'] } });
-    await db.createIndex({ index: { fields: ['type', 'taskId'] } });
-    await db.createIndex({ index: { fields: ['type', 'assigneeId'] } });
-    await db.createIndex({ index: { fields: ['type', 'status'] } });
+    await prisma.$connect();
+    fastify.log.info('Connected to PostgreSQL via Prisma');
   } catch (e) {
-    // Indexes might already exist
+    fastify.log.error(e, 'Failed to connect to PostgreSQL');
+    throw e;
   }
 
   // Auto-create Super Admin if none exists
   try {
-    const adminQ = await db.find({ selector: { type: 'USER', role: 'ADMIN' }, limit: 1 });
-    if (adminQ.docs.length === 0) {
+    const adminCount = await prisma.user.count({
+      where: { role: UserRole.ADMIN }
+    });
+
+    if (adminCount === 0) {
       const passwordHash = await bcrypt.hash('Admin@123', 12);
-      await db.insert({
-        _id: `user_${uuidv4()}`,
-        type: 'USER',
-        name: 'Super Admin',
-        email: 'admin@taskflow.dev',
-        passwordHash,
-        role: 'ADMIN',
-        status: 'APPROVED',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+      await prisma.user.create({
+        data: {
+          name: 'Super Admin',
+          email: 'admin@taskflow.dev',
+          passwordHash,
+          role: UserRole.ADMIN,
+          status: UserStatus.APPROVED,
+        }
       });
       fastify.log.info('========================================');
       fastify.log.info('  Super Admin created automatically!');
@@ -63,5 +54,9 @@ export default fp(async (fastify) => {
     fastify.log.error({ err: e }, 'Failed to create super admin');
   }
 
-  fastify.decorate('db', db);
+  fastify.decorate('db', prisma);
+
+  fastify.addHook('onClose', async (instance) => {
+    await instance.db.$disconnect();
+  });
 });

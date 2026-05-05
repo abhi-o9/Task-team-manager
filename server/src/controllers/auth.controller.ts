@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import bcrypt from 'bcryptjs';
-import { v4 as uuidv4 } from 'uuid';
+import { UserRole, UserStatus } from '@prisma/client';
 import { signupSchema, loginSchema } from '../schemas/auth.schema';
 
 export class AuthController {
@@ -9,44 +9,37 @@ export class AuthController {
   register = async (request: FastifyRequest, reply: FastifyReply) => {
     const data = signupSchema.parse(request.body);
 
-    const q = await this.fastify.db.find({
-      selector: { type: 'USER', email: data.email },
-      limit: 1
+    const existing = await this.fastify.db.user.findUnique({
+      where: { email: data.email }
     });
 
-    if (q.docs.length > 0) {
+    if (existing) {
       throw { statusCode: 400, message: 'User already exists' };
     }
 
     const passwordHash = await bcrypt.hash(data.password, 12);
 
-    const userDoc = {
-      _id: `user_${uuidv4()}`,
-      type: 'USER',
-      name: data.name,
-      email: data.email,
-      passwordHash,
-      role: 'MEMBER',
-      status: 'PENDING',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
+    const user = await this.fastify.db.user.create({
+      data: {
+        name: data.name,
+        email: data.email,
+        passwordHash,
+        role: UserRole.MEMBER,
+        status: UserStatus.PENDING,
+      }
+    });
 
-    await this.fastify.db.insert(userDoc);
-
-    const { passwordHash: _, ...userWithoutPassword } = userDoc;
+    const { passwordHash: _, ...userWithoutPassword } = user;
     return { success: true, data: userWithoutPassword };
   };
 
   login = async (request: FastifyRequest, reply: FastifyReply) => {
     const data = loginSchema.parse(request.body);
 
-    const q = await this.fastify.db.find({
-      selector: { type: 'USER', email: data.email },
-      limit: 1
+    const user = await this.fastify.db.user.findUnique({
+      where: { email: data.email }
     });
 
-    const user = q.docs[0];
     if (!user) {
       throw { statusCode: 401, message: 'Invalid credentials' };
     }
@@ -56,24 +49,21 @@ export class AuthController {
       throw { statusCode: 401, message: 'Invalid credentials' };
     }
 
-    if (user.status === 'PENDING') {
+    if (user.status === UserStatus.PENDING) {
       throw { statusCode: 403, message: 'Your account is pending approval by an administrator.' };
     }
 
-    // Since _id acts as id for the client
-    const userId = user._id;
+    const userId = user.id;
 
     const accessToken = this.fastify.jwt.sign({ id: userId, role: user.role });
     const refreshToken = this.fastify.jwt.sign({ id: userId, role: user.role }, { expiresIn: '7d' });
 
-    const tokenDoc = {
-      _id: `token_${uuidv4()}`,
-      type: 'REFRESH_TOKEN',
-      token: refreshToken,
-      userId,
-      createdAt: new Date().toISOString()
-    };
-    await this.fastify.db.insert(tokenDoc);
+    await this.fastify.db.refreshToken.create({
+      data: {
+        token: refreshToken,
+        userId,
+      }
+    });
 
     reply.setCookie('refreshToken', refreshToken, {
       path: '/',
@@ -83,8 +73,8 @@ export class AuthController {
       maxAge: 7 * 24 * 60 * 60,
     });
 
-    const { passwordHash: _, _id, _rev, ...u } = user;
-    return { success: true, data: { user: { id: _id, ...u }, accessToken } };
+    const { passwordHash: _, ...u } = user;
+    return { success: true, data: { user: u, accessToken } };
   };
 
   refresh = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -98,18 +88,18 @@ export class AuthController {
       throw { statusCode: 401, message: 'Invalid refresh token' };
     }
 
-    const q = await this.fastify.db.find({
-      selector: { type: 'REFRESH_TOKEN', token: refreshToken, userId: decoded.id },
-      limit: 1
+    const storedToken = await this.fastify.db.refreshToken.findUnique({
+      where: { token: refreshToken }
     });
 
-    if (q.docs.length === 0) {
+    if (!storedToken || storedToken.userId !== decoded.id) {
       throw { statusCode: 401, message: 'Invalid refresh token' };
     }
 
-    const userDoc = await this.fastify.db.get(decoded.id);
+    const user = await this.fastify.db.user.findUnique({ where: { id: decoded.id } });
+    if (!user) throw { statusCode: 401, message: 'User not found' };
 
-    const accessToken = this.fastify.jwt.sign({ id: userDoc._id, role: userDoc.role });
+    const accessToken = this.fastify.jwt.sign({ id: user.id, role: user.role });
 
     return { success: true, data: { accessToken } };
   };
@@ -117,13 +107,9 @@ export class AuthController {
   logout = async (request: FastifyRequest, reply: FastifyReply) => {
     const refreshToken = request.cookies.refreshToken;
     if (refreshToken) {
-      const q = await this.fastify.db.find({
-        selector: { type: 'REFRESH_TOKEN', token: refreshToken },
-        limit: 1
+      await this.fastify.db.refreshToken.deleteMany({
+        where: { token: refreshToken }
       });
-      if (q.docs.length > 0) {
-        await this.fastify.db.destroy(q.docs[0]._id, q.docs[0]._rev);
-      }
     }
 
     reply.clearCookie('refreshToken', {
@@ -136,8 +122,9 @@ export class AuthController {
   };
 
   me = async (request: FastifyRequest, reply: FastifyReply) => {
-    const userDoc = await this.fastify.db.get(request.user.id);
-    const { passwordHash: _, _id, _rev, ...u } = userDoc;
-    return { success: true, data: { id: _id, ...u } };
+    const user = await this.fastify.db.user.findUnique({ where: { id: request.user.id } });
+    if (!user) throw { statusCode: 404, message: 'User not found' };
+    const { passwordHash: _, ...u } = user;
+    return { success: true, data: u };
   };
 }

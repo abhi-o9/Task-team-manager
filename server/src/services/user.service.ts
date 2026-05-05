@@ -1,87 +1,127 @@
-import { DocumentScope } from 'nano';
+import { PrismaClient, UserRole, UserStatus } from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 export class UserService {
-  constructor(private db: DocumentScope<any>) {}
+  constructor(private db: PrismaClient) {}
 
   async listUsers(page: number = 1, limit: number = 20) {
-    const q = await this.db.find({
-      selector: { type: 'USER' },
-      limit: 1000
-    });
-    
-    const allUsers = q.docs
-      .filter(u => u.role !== 'ADMIN')
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    const total = allUsers.length;
     const skip = (page - 1) * limit;
-    const data = allUsers.slice(skip, skip + limit).map(u => {
-      const { passwordHash: _, _id, _rev, ...rest } = u;
-      return { id: _id, ...rest };
-    });
+    
+    const [allUsers, total] = await Promise.all([
+      this.db.user.findMany({
+        where: { role: { not: UserRole.ADMIN } },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          status: true,
+          avatarUrl: true,
+          createdAt: true,
+          updatedAt: true,
+        }
+      }),
+      this.db.user.count({
+        where: { role: { not: UserRole.ADMIN } }
+      })
+    ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    return { data: allUsers, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   async listPendingUsers() {
-    const q = await this.db.find({
-      selector: { type: 'USER', status: 'PENDING' },
-      limit: 1000
-    });
-    return q.docs.map(u => {
-      const { passwordHash: _, _id, _rev, ...rest } = u;
-      return { id: _id, ...rest };
+    return this.db.user.findMany({
+      where: { status: UserStatus.PENDING },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        status: true,
+        avatarUrl: true,
+        createdAt: true,
+        updatedAt: true,
+      }
     });
   }
 
-  async approveUser(targetUserId: string, role: 'MANAGER' | 'MEMBER') {
-    const user = await this.db.get(targetUserId).catch(() => null);
-    if (!user || user.type !== 'USER') throw { statusCode: 404, message: 'User not found' };
-    if (user.status !== 'PENDING') throw { statusCode: 400, message: 'User is not pending approval' };
+  async approveUser(targetUserId: string, role: UserRole) {
+    const user = await this.db.user.update({
+      where: { id: targetUserId },
+      data: {
+        role,
+        status: UserStatus.APPROVED,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        status: true,
+        avatarUrl: true,
+        createdAt: true,
+        updatedAt: true,
+      }
+    });
 
-    user.role = role;
-    user.status = 'APPROVED';
-    user.updatedAt = new Date().toISOString();
-
-    await this.db.insert(user);
-
-    const { passwordHash: _, _id, _rev, ...rest } = user;
-    return { id: _id, ...rest };
+    return user;
   }
 
   async getUserById(id: string) {
-    const user = await this.db.get(id).catch(() => null);
-    if (!user || user.type !== 'USER') throw { statusCode: 404, message: 'User not found' };
-    const { passwordHash: _, _id, _rev, ...rest } = user;
-    return { id: _id, ...rest };
+    const user = await this.db.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        status: true,
+        avatarUrl: true,
+        createdAt: true,
+        updatedAt: true,
+      }
+    });
+    if (!user) throw { statusCode: 404, message: 'User not found' };
+    return user;
   }
 
   async updateUser(id: string, data: any) {
-    const user = await this.db.get(id).catch(() => null);
-    if (!user || user.type !== 'USER') throw { statusCode: 404, message: 'User not found' };
-
-    if (data.name !== undefined) user.name = data.name;
-    if (data.email !== undefined) user.email = data.email;
-    if (data.role !== undefined) user.role = data.role;
-    if (data.avatarUrl !== undefined) user.avatarUrl = data.avatarUrl;
-    user.updatedAt = new Date().toISOString();
-
-    await this.db.insert(user);
-    
-    const { passwordHash: _, _id, _rev, ...rest } = user;
-    return { id: _id, ...rest };
+    const user = await this.db.user.update({
+      where: { id },
+      data: {
+        name: data.name,
+        email: data.email,
+        role: data.role,
+        avatarUrl: data.avatarUrl,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        status: true,
+        avatarUrl: true,
+        createdAt: true,
+        updatedAt: true,
+      }
+    });
+    return user;
   }
 
   async changePassword(id: string, data: any) {
-    const user = await this.db.get(id).catch(() => null);
-    if (!user || user.type !== 'USER') throw { statusCode: 404, message: 'User not found' };
+    const user = await this.db.user.findUnique({ where: { id } });
+    if (!user) throw { statusCode: 404, message: 'User not found' };
 
     const isValid = await bcrypt.compare(data.currentPassword, user.passwordHash);
     if (!isValid) throw { statusCode: 401, message: 'Incorrect current password' };
 
-    user.passwordHash = await bcrypt.hash(data.newPassword, 12);
-    user.updatedAt = new Date().toISOString();
-    
-    await this.db.insert(user);
+    const passwordHash = await bcrypt.hash(data.newPassword, 12);
+    await this.db.user.update({
+      where: { id },
+      data: { passwordHash }
+    });
   }
 }
