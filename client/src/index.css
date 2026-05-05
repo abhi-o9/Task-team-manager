@@ -1,0 +1,56 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@600;700&family=Inter:wght@400;500&family=JetBrains+Mono&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-base: #0D0F14;
+  --bg-surface: #161A22;
+  --bg-elevated: #1E2330;
+  --border: #2A2F3E;
+  --accent-primary: #4F8EF7;
+  --accent-secondary: #7C5CFC;
+  --accent-success: #34D399;
+  --accent-warning: #FBBF24;
+  --accent-danger: #F87171;
+  --text-primary: #F1F5F9;
+  --text-secondary: #8B95A9;
+  --text-disabled: #4B5563;
+}
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'DM Sans', sans-serif;
+}
+
+/* Custom utilities */
+.glass-effect {
+  background: rgba(22, 26, 34, 0.7);
+  backdrop-filter: blur(10px);
+}
+
+.card-shadow {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
