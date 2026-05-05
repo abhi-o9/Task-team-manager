@@ -5,6 +5,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 export default fp(async (fastify) => {
   const url = process.env.COUCHDB_URL || 'http://admin:admin@127.0.0.1:5984';
+  const maskedUrl = url.replace(/:([^@]+)@/, ':****@');
+  fastify.log.info(`Connecting to CouchDB at: ${maskedUrl}`);
   const couch: ServerScope = nano(url);
 
   const dbName = 'taskflow';
