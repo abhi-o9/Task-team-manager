@@ -15,6 +15,7 @@ import commentRoutes from './routes/comments';
 import dashboardRoutes from './routes/dashboard';
 
 const fastify = Fastify({
+  pluginTimeout: 30000,
   logger: {
     level: 'info',
     transport: {
